@@ -1,0 +1,46 @@
+# Created by venv; see https://docs.python.org/3/library/venv.html
+
+# Configuration files with sensitive data
+counter_config.json
+counter_config.clean.json
+# Allow template files
+# counter_config.template.json
+
+# Runtime files
+auto_counter.log
+*.log
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+ENV/
+bin/
+lib/
+lib64
+lib64/
+pyvenv.cfg
+share/
+include/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Shared screenshots (these should be committed when available)
+# screenshots/

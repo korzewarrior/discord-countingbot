@@ -1,0 +1,38 @@
+{
+  "channel_id": "YOUR_CHANNEL_ID_HERE",
+  "current_count": 0,
+  "last_counter_index": null,
+  "counting_active": false,
+  "run_hours": [
+    0,
+    23
+  ],
+  "min_delay": 1.0,
+  "max_delay": 2.0,
+  "count_limit": 1000000,
+  "bot_usernames": [
+    "counting",
+    "Counting",
+    "CountingBot",
+    "APP",
+    "APP counting"
+  ],
+  "scan_interval": 30,
+  "speed_mode": false,
+  "messages_per_second": 5.0,
+  "verify_last_message": true,
+  "accounts": [
+    {
+      "username": "example_account1",
+      "token": "YOUR_TOKEN_HERE",
+      "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+      "message_count": 0
+    },
+    {
+      "username": "example_account2",
+      "token": "YOUR_TOKEN_HERE",
+      "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+      "message_count": 0
+    }
+  ]
+}
