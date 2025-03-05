@@ -5,7 +5,7 @@ import random
 import logging
 import requests
 import argparse
-import schedule
+#import schedule
 import datetime
 import re
 from threading import Thread
@@ -32,6 +32,7 @@ class DiscordAccount:
         self.last_used = None
         self.message_count = 0
         self.session = requests.Session()
+        self.id = None  # Will be populated when we fetch account info
         
         # Set up default headers
         self.headers = {
@@ -39,6 +40,27 @@ class DiscordAccount:
             "User-Agent": self.user_agent,
             "Content-Type": "application/json"
         }
+        
+        # Try to get account ID
+        self.get_account_info()
+    
+    def get_account_info(self):
+        """Get account information including user ID"""
+        try:
+            url = "https://discord.com/api/v9/users/@me"
+            response = self.session.get(url, headers=self.headers, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                self.id = data.get('id')
+                logger.info(f"Retrieved account info for {self.username}, ID: {self.id}")
+                return True
+            else:
+                logger.error(f"Failed to get account info for {self.username}: {response.status_code} - {response.text}")
+                return False
+        except Exception as e:
+            logger.error(f"Error getting account info for {self.username}: {str(e)}")
+            return False
     
     def send_message(self, channel_id, content):
         """Send a message to a Discord channel"""
@@ -216,6 +238,12 @@ class AutoCounter:
         self.messages_per_second = 5.0  # Default messages per second in speed mode
         self.verify_last_message = True  # Whether to verify the last message was received
         self.auto_restart_after_reset = False  # New flag for auto-restart after reset
+        self.solo_mode = False  # New flag for solo mode - wait for external users to count
+        self.last_external_counter = None  # Track the last external user who counted
+        self.last_external_counter_id = None  # Track the last external user ID who counted
+        self.last_counter_id = None  # Track the very last counter ID (whether bot or external user)
+        self.solo_timeout = 300  # How long to wait for external users before counting anyway (5 minutes)
+        self.last_external_count_time = 0  # When the last external user counted
         self.load_config()
         
     def load_config(self):
@@ -238,6 +266,12 @@ class AutoCounter:
                 self.speed_mode = config.get('speed_mode', False)
                 self.messages_per_second = config.get('messages_per_second', 5.0)
                 self.verify_last_message = config.get('verify_last_message', True)
+                self.solo_mode = config.get('solo_mode', False)
+                self.solo_timeout = config.get('solo_timeout', 300)
+                self.last_external_counter = config.get('last_external_counter')
+                self.last_external_counter_id = config.get('last_external_counter_id')
+                self.last_counter_id = config.get('last_counter_id')
+                self.last_external_count_time = config.get('last_external_count_time', 0)
                 
                 # Load accounts
                 for account_data in config.get('accounts', []):
@@ -251,6 +285,8 @@ class AutoCounter:
                     
                 logger.info(f"Loaded configuration with {len(self.accounts)} accounts")
                 logger.info(f"Current count: {self.current_count}")
+                if self.solo_mode:
+                    logger.info("Solo mode enabled - will wait for external users to count")
             else:
                 logger.info("No configuration file found, creating new one")
                 self.save_config()
@@ -274,6 +310,12 @@ class AutoCounter:
                 'speed_mode': self.speed_mode,
                 'messages_per_second': self.messages_per_second,
                 'verify_last_message': self.verify_last_message,
+                'solo_mode': self.solo_mode,
+                'solo_timeout': self.solo_timeout,
+                'last_external_counter': self.last_external_counter,
+                'last_external_counter_id': self.last_external_counter_id,
+                'last_counter_id': self.last_counter_id,
+                'last_external_count_time': self.last_external_count_time,
                 'accounts': []
             }
             
@@ -407,51 +449,28 @@ class AutoCounter:
         return True
     
     def reset_count_to_one(self):
-        """Reset the current count to 1 (for when the count is ruined)"""
-        logger.warning("🚨 COUNT RESET DETECTED 🚨")
-        logger.warning("Resetting count to 0 (next number will be 1)")
+        """Reset the count to 1 and update state"""
+        logger.warning("RESET: Resetting count to 1")
         
-        # Stop counting temporarily to reset everything
-        self.counting_active = False
-        
-        # Reset our tracking
-        self.current_count = 0
+        # Update state
+        self.current_count = 0  # Will be incremented to 1 on next count
         self.last_counter_index = None
-        self.counts_performed = 0
         
-        # Save the updated configuration
+        # Clear solo mode counters too
+        self.last_counter_id = None
+        self.last_external_counter = None
+        self.last_external_counter_id = None
+        self.last_external_count_time = 0
+        
+        # Save the updated state
         self.save_config()
         
-        # Directly write to the config file to ensure it's updated before any future operations
-        try:
-            # Read the current config file to ensure we have the latest version
-            with open(self.config_file, 'r') as f:
-                config_data = json.load(f)
-                
-            # Update the critical fields
-            config_data['current_count'] = 0
-            config_data['last_counter_index'] = None
-            config_data['counting_active'] = False
+        # Check if we need to auto-restart
+        if self.counting_active and self.auto_restart_after_reset:
+            logger.info("Auto-restart enabled, will restart counting")
+            return "reset_auto_restart"
             
-            # Write back to the file
-            with open(self.config_file, 'w') as f:
-                json.dump(config_data, f, indent=2)
-                
-            logger.info("Config file directly updated to reset count")
-        except Exception as e:
-            logger.error(f"Error updating config file directly: {e}")
-        
-        # Set the auto-restart flag to true - we'll use this to automatically restart counting
-        self.auto_restart_after_reset = True
-        
-        # Update last_reset_time to now to prevent old messages from triggering resets again
-        self.last_reset_time = datetime.datetime.now().timestamp()
-        logger.info(f"Updated reset timestamp to current time: {datetime.datetime.fromtimestamp(self.last_reset_time).strftime('%Y-%m-%d %H:%M:%S')}")
-        
-        logger.warning("Count has been reset. Auto-restart will begin in 3 seconds...")
-        
-        # Return "reset" to signal the counting loop to restart
-        return "reset_auto_restart"
+        return "reset"
 
     def auto_restart(self):
         """Automatically restart counting after a reset"""
@@ -481,6 +500,14 @@ class AutoCounter:
         
     def select_next_counter(self):
         """Select the next account to count"""
+        # In solo mode, we always use the first account
+        if self.solo_mode:
+            if len(self.accounts) < 1:
+                logger.error("Need at least 1 account for solo mode")
+                return None
+            return 0  # Always use the first account in solo mode
+            
+        # Standard mode requires at least 2 accounts
         if len(self.accounts) < 2:
             logger.error("Need at least 2 accounts to avoid counting twice in a row")
             return None
@@ -548,9 +575,12 @@ class AutoCounter:
             r"count starts.*?at 1",
             r"count starts.*?at \*\*1\*\*",
             r"ruined it at",
+            r"ruined it at.*?next number is 1",  # Exact pattern from screenshot
+            r"ruined it at.*?next number is.*?1",  # More flexible for the screenshot
             r"we reached \d+ before the streak ended",
             r"start again from 1",
-            r"the.*?next.*?number.*?is.*?1"  # More flexible pattern
+            r"the.*?next.*?number.*?is.*?1",  # More flexible pattern
+            r".*?ruined.*?at.*?\d+.*?next.*?number.*?is.*?1"  # Super flexible for any RUINED AT format
         ]
         
         # If any pattern matches, the message indicates a reset
@@ -562,6 +592,12 @@ class AutoCounter:
                 
         # Special cases for APP counting bot
         if ("⚠️" in content and "1" in content) or ("ruined" in content and "1" in content):
+            logger.warning(f"Reset detected with special case APP pattern in message: {content}")
+            return True
+        
+        # Another backup check for APP's typical message format
+        if "ruined" in content and "next number" in content:
+            logger.warning(f"Reset detected with backup APP pattern in message: {content}")
             return True
             
         return False
@@ -626,7 +662,7 @@ class AutoCounter:
                     continue
                     
                 # Direct check for APP bot messages about resets
-                if author_username == "APP" or author_username == "APP counting":
+                if author_username == "APP" or author_username == "APP counting" or author_username.upper() == "APP":
                     logger.info(f"Found APP bot message: {content}")
                     
                     # Specific checks for common APP reset messages
@@ -637,24 +673,24 @@ class AutoCounter:
                         if message_time > latest_reset_time:
                             latest_reset_time = message_time
                         
-                    if "RUINED IT AT" in content and "Next number is 1" in content:
+                    if "RUINED IT AT" in content or "ruined it at" in content.lower():
                         logger.warning(f"Reset detected from APP bot RUINED IT message: {content}")
                         reset_detected = True
                         # Update latest reset time
                         if message_time > latest_reset_time:
                             latest_reset_time = message_time
-                        
-                # Check all bots including APP
-                is_bot_message = False
-                for bot_username in self.bot_usernames:
-                    if bot_username.lower() in author_username.lower():
-                        is_bot_message = True
-                        break
-                        
-                if is_bot_message:
-                    # Check for reset indicators using our pattern matching
-                    if self.is_message_indicating_reset(content):
-                        logger.warning(f"Reset message detected from bot {author_username}: {content}")
+                            
+                    # Add pattern matching the screenshot format
+                    if "RUINED IT AT" in content and "Next number is" in content and "1" in content:
+                        logger.warning(f"Reset detected from APP bot RUINED message with format: {content}")
+                        reset_detected = True
+                        # Update latest reset time
+                        if message_time > latest_reset_time:
+                            latest_reset_time = message_time
+                            
+                    # More generic reset detection for APP bots
+                    if ("ruined" in content.lower() or "RUINED" in content) and ("1" in content or "one" in content.lower()):
+                        logger.warning(f"Reset detected from APP bot with generic ruined pattern: {content}")
                         reset_detected = True
                         # Update latest reset time
                         if message_time > latest_reset_time:
@@ -680,10 +716,12 @@ class AutoCounter:
             last_counter_index = None
             most_recent_timestamp = 0
             most_recent_message_time = 0
+            is_external_user = False  # Flag to track if the counter was an external user
             
             # Process the messages to find valid number sequences and the latest count
             for message in messages:
                 author_username = message.get("author", {}).get("username", "")
+                author_id = message.get("author", {}).get("id", "")
                 content = message.get("content", "").strip()
                 timestamp = message.get("timestamp", "")
                 
@@ -703,7 +741,7 @@ class AutoCounter:
                     logger.debug(f"Skipping pre-reset message: {content} (from {datetime.datetime.fromtimestamp(message_time).strftime('%Y-%m-%d %H:%M:%S')})")
                     continue
                 
-                # Skip messages from counting bots (already processed above)
+                # Skip messages from counting bots (already processed above for reset detection)
                 is_bot_message = False
                 for bot_username in self.bot_usernames:
                     if bot_username.lower() in author_username.lower():
@@ -713,26 +751,46 @@ class AutoCounter:
                 if is_bot_message:
                     continue
                     
-                # Try to extract a valid number from the content
+                # THIS IS THE MISSING PART: Try to extract a number from the message
                 try:
-                    number = int(content)
+                    # If the content is a number, this could be a valid count
+                    if content.isdigit():
+                        number = int(content)
+                        
+                        # Update if this is the most recent valid count we've found
+                        if message_time > most_recent_message_time:
+                            current_count = number
+                            last_counter = author_username
+                            most_recent_message_time = message_time
+                            
+                            # Find which of our accounts this is (if any)
+                            last_counter_index = None
+                            for i, account in enumerate(self.accounts):
+                                if account.username.lower() == author_username.lower():
+                                    last_counter_index = i
+                                    break
+                                    
+                            # Check if this is an external user
+                            is_external_user = (last_counter_index is None)
+                            
+                            # IMPORTANT: Always track the last counter ID whether it's our bot or external user
+                            if is_external_user:
+                                # This is an external user
+                                self.last_external_counter = author_username
+                                self.last_external_counter_id = author_id
+                                self.last_external_count_time = message_time
+                                logger.info(f"External user {author_username} counted {number}")
+                                self.last_counter_id = author_id  # Set the last counter ID directly
+                            else:
+                                # This is one of our bot accounts
+                                if last_counter_index is not None:
+                                    account_id = self.accounts[last_counter_index].id if hasattr(self.accounts[last_counter_index], 'id') else None
+                                    if account_id:
+                                        logger.info(f"Bot account {author_username} counted {number}")
+                                        self.last_counter_id = account_id  # Set the last counter ID directly
+                
                 except (ValueError, TypeError):
-                    # Not a valid number, check next message
                     continue
-                    
-                # Ensure this message is newer than our current candidate and after any reset
-                if timestamp and message_time > most_recent_message_time and message_time > self.last_reset_time:
-                    most_recent_timestamp = timestamp
-                    most_recent_message_time = message_time
-                    current_count = number
-                    last_counter = author_username
-                    
-                    # Find the index of this account in our accounts list
-                    last_counter_index = None
-                    for i, account in enumerate(self.accounts):
-                        if account.username.lower() == author_username.lower():
-                            last_counter_index = i
-                            break
             
             # If we found a new reset, we should have returned earlier
             # Check if we're expecting to start from 1 (after a reset with no numbers yet)
@@ -742,12 +800,22 @@ class AutoCounter:
                             
             # If we found a valid count that's newer than the last reset, update our state
             if current_count is not None:
-                logger.info(f"Scan results: Current count = {current_count}, last counter = {last_counter}")
+                logger.info(f"Scan results: Current count = {current_count}, last counter = {last_counter}, external user: {is_external_user}")
                 
                 # Update our internal state
                 self.current_count = current_count
                 self.last_counter_index = last_counter_index
+                
+                # If it's an external user, set the last_counter_id 
+                # (this helps us track who last counted in solo mode)
+                if is_external_user:
+                    self.last_counter_id = self.last_external_counter_id
+                
                 self.save_config()
+                
+                # In solo mode, we want to know if a DIFFERENT external user counted
+                if self.solo_mode and is_external_user:
+                    return True, f"Current count: {current_count}, external user counted"
                 
                 return True, f"Current count: {current_count}"
             else:
@@ -894,6 +962,23 @@ class AutoCounter:
         else:
             logger.info("Performing initial scan before starting counting loop")
             initial_scan_success, initial_scan_message = self.scan_channel()
+            
+            # If we're in solo mode, log who was the last counter for debugging
+            if self.solo_mode:
+                if self.last_counter_id:
+                    # Check if the last counter was one of our accounts
+                    is_our_account = False
+                    for account in self.accounts:
+                        if hasattr(account, 'id') and account.id == self.last_counter_id:
+                            logger.warning(f"SOLO MODE: Last counter was our own account {account.username} - will wait for external user")
+                            is_our_account = True
+                            break
+                    
+                    if not is_our_account:
+                        logger.info(f"SOLO MODE: Last counter was external user with ID {self.last_counter_id} - we can count next")
+                else:
+                    logger.warning("SOLO MODE: No last counter ID found - will proceed with counting")
+            
             if not initial_scan_success:
                 logger.error(f"Initial scan failed: {initial_scan_message}")
                 logger.error("Cannot start counting without a valid initial scan")
@@ -997,18 +1082,49 @@ class AutoCounter:
                     logger.error("Failed to select next counter, waiting...")
                     time.sleep(10)
                     continue
-                    
-                # Get the next account and prepare the count
+                
+                # Get the account to use
                 next_account = self.accounts[next_counter_index]
                 
                 # Pass speed mode info to account
                 if self.speed_mode:
                     next_account.speed_mode = True
                 
+                # SOLO MODE: Check if we should wait for an external user
+                if self.solo_mode:
+                    # In solo mode, we need to check if we were the last counter or an external user
+                    current_time = time.time()
+                    
+                    # Calculate how long since the last external user counted
+                    time_since_external = current_time - self.last_external_count_time if self.last_external_count_time > 0 else float('inf')
+                    
+                    # Get the ID of our bot account that will be counting
+                    bot_account_id = None
+                    for account in self.accounts:
+                        if account.username == next_account.username:
+                            bot_account_id = account.id if hasattr(account, 'id') else "bot_account"
+                            break
+                    
+                    # The critical check: Simply check if the last counter was not this bot account
+                    # (removing the unnecessary check against last_external_counter_id)
+                    is_different_user = self.last_counter_id != bot_account_id
+                    
+                    if not is_different_user:
+                        logger.info(f"Solo mode waiting: Need a different user to count. This bot account was the last counter.")
+                        logger.info(f"Time since last external count: {time_since_external:.1f}s (timeout: {self.solo_timeout}s)")
+                        time.sleep(5)  # Wait a bit before checking again
+                        continue  # Skip counting this round
+                    else:
+                        logger.info(f"Solo mode: Different user has counted, proceeding with our count")
+                
+                # If not in solo mode, or if solo mode timeout expired, proceed with counting
+                
                 # Skip typing simulation in ludicrous mode
                 if not ludicrous_mode:
-                    # Simulate typing
-                    next_account.simulate_typing(self.channel_id, len(next_count))
+                    # Optionally simulate typing before sending message
+                    if hasattr(next_account, 'simulate_typing') and callable(getattr(next_account, 'simulate_typing')):
+                        # Simulate typing
+                        next_account.simulate_typing(self.channel_id, len(next_count))
                 
                 # FINAL check before sending to make sure count hasn't changed
                 final_check_success, _ = self.scan_channel()
@@ -1023,6 +1139,10 @@ class AutoCounter:
                     self.last_counter_index = next_counter_index
                     self.counts_performed += 1
                     last_message_content = next_count  # Store for verification
+                    
+                    # Update the last counter ID to the bot account that just counted
+                    if hasattr(next_account, 'id') and next_account.id:
+                        self.last_counter_id = next_account.id
                     
                     # Successful message, track consecutive successes
                     consecutive_successes += 1
@@ -1046,7 +1166,7 @@ class AutoCounter:
                         if self.counts_performed % 50 == 0:
                             logger.info(f"LUDICROUS COUNT: {self.current_count} | Progress: {self.counts_performed}/{self.count_limit if self.count_limit else 'unlimited'}")
                     elif not self.speed_mode or self.counts_performed % 5 == 0:
-                        logger.info(f"Count: {self.current_count} | By: {next_account.username} | " +
+                        logger.info(f"Count: {self.current_count} | By: {next_account.username} | "
                                   f"Progress: {self.counts_performed}/{self.count_limit if self.count_limit else 'unlimited'}")
                     
                     # Calculate delay for next count with adaptive adjustment
@@ -1237,27 +1357,106 @@ class AutoCounter:
         """Reset all network sessions when a network change is detected"""
         logger.warning("Network change detected! Reconnecting all sessions...")
         try:
-            # Recreate all sessions for all accounts
+            # Preserve account IDs during reconnection
             for account in self.accounts:
                 try:
+                    # Save the current ID before recreating session
+                    account_id = account.id if hasattr(account, 'id') else None
+                    
                     # Close existing session if possible
                     if hasattr(account.session, 'close'):
                         account.session.close()
                     # Create new session
                     account.session = requests.Session()
+                    
+                    # Restore the account ID if it existed
+                    if account_id:
+                        account.id = account_id
+                        
                     logger.info(f"Reconnected session for account: {account.username}")
                 except Exception as e:
                     logger.error(f"Error reconnecting session for account {account.username}: {str(e)}")
                     
+            # Force a scan after reconnection to ensure we have the latest state
+            logger.info("Running scan after reconnection to ensure latest state...")
+            self.scan_channel()
+            
             logger.info("All sessions reconnected successfully")
             return True
         except Exception as e:
             logger.error(f"Error in reconnect_all_sessions: {str(e)}")
             return False
 
+    def force_rescan_for_resets(self):
+        """Force a deep rescan of the channel specifically looking for reset messages"""
+        logger.warning("EMERGENCY: Performing deep rescan for reset messages")
+        
+        try:
+            # Get the most recent messages (more than usual to really check)
+            messages = []
+            for account in self.accounts:
+                account_messages = account.get_channel_messages(self.channel_id, limit=50)  # Scan more messages
+                if account_messages:
+                    messages = account_messages
+                    break
+                    
+            if not messages:
+                logger.error("No messages found in channel during deep rescan")
+                return False, "No messages found"
+            
+            # Temporarily disable time-based filtering to catch all reset messages
+            original_reset_time = self.last_reset_time
+            self.last_reset_time = 0
+            
+            # Scan for reset messages from bots
+            for message in messages:
+                author_username = message.get("author", {}).get("username", "")
+                content = message.get("content", "")
+                
+                # First check if this is a bot message
+                is_bot_message = False
+                for bot_username in self.bot_usernames:
+                    if bot_username.lower() in author_username.lower():
+                        is_bot_message = True
+                        break
+                
+                # Check APP bot specifically
+                is_app_bot = author_username == "APP" or author_username.upper() == "APP" or author_username == "APP counting"
+                
+                if is_bot_message or is_app_bot:
+                    # Check for reset indicators in a more aggressive way
+                    if "ruined" in content.lower() or "reset" in content.lower() or "next number is 1" in content.lower():
+                        logger.warning(f"Found reset message: {content} from {author_username}")
+                        
+                        # Reset the count
+                        self.reset_count_to_one()
+                        
+                        # Restore the original reset time but add this one
+                        timestamp_str = message.get("timestamp", "")
+                        if timestamp_str:
+                            try:
+                                timestamp_dt = datetime.datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                                self.last_reset_time = timestamp_dt.timestamp()
+                                logger.info(f"Updated last_reset_time to {datetime.datetime.fromtimestamp(self.last_reset_time).strftime('%Y-%m-%d %H:%M:%S')}")
+                            except (ValueError, TypeError):
+                                self.last_reset_time = datetime.datetime.now().timestamp()
+                        else:
+                            self.last_reset_time = datetime.datetime.now().timestamp()
+                            
+                        return True, "Reset detected and count set to 0"
+            
+            # If we get here, no reset was found
+            self.last_reset_time = original_reset_time
+            logger.info("No reset messages found during deep rescan")
+            return False, "No reset messages found"
+            
+        except Exception as e:
+            logger.error(f"Error during deep rescan: {str(e)}")
+            return False, f"Error during deep rescan: {str(e)}"
+
 def display_menu():
-    """Display the main menu and get user input"""
-    print("=== Discord Auto Counter ===")
+    """Display menu options and return user choice"""
+    print("\n=== Discord Auto Counter ===")
     print("1. Add Account")
     print("2. Remove Account")
     print("3. List Accounts")
@@ -1277,6 +1476,10 @@ def display_menu():
     print("17. EMERGENCY: Fix Count Mismatch")
     print("18. Toggle Auto-Restart After Reset")
     print("19. NETWORK: Reconnect All Sessions")
+    print("20. Toggle Solo Mode")
+    print("21. Configure Solo Timeout (Legacy - Not Used)")
+    print("22. EMERGENCY: Force Reset Count to 1")
+    print("23. EMERGENCY: Deep Scan for Reset Messages")
     print("0. Exit")
     
     return input("Select an option: ")
@@ -1291,6 +1494,7 @@ def main():
     parser.add_argument('--auto-restart', action='store_true', help='Enable auto-restart after resets')
     parser.add_argument('--smart-speed', action='store_true', help='Enable smart speed adjustment')
     parser.add_argument('--reconnect', action='store_true', help='Reconnect all network sessions')
+    parser.add_argument('--solo', action='store_true', help='Enable solo mode - wait for external users')
     args = parser.parse_args()
     
     # Load configuration
@@ -1319,6 +1523,12 @@ def main():
     if args.smart_speed:
         counter.smart_speed()
         logger.info("🧠 Smart speed mode enabled: Bot will adjust speed automatically")
+        
+    # Enable solo mode if specified
+    if args.solo:
+        counter.solo_mode = True
+        counter.save_config()
+        logger.info("👤 Solo mode enabled: Bot will wait for external users to count")
         
     # Start immediately if specified
     if args.start:
@@ -1434,6 +1644,22 @@ def main():
             print(f"Messages per second: {counter.messages_per_second}")
             print(f"Message verification: {counter.verify_last_message}")
             print(f"Count limit: {counter.count_limit if counter.count_limit else 'unlimited'}")
+            print(f"Solo mode: {counter.solo_mode}")
+            if counter.solo_mode:
+                print(f"Solo timeout: {counter.solo_timeout} seconds (Note: This value is not actually used)")
+            if counter.last_external_counter:
+                print(f"Last external counter: {counter.last_external_counter}")
+                time_since = time.time() - counter.last_external_count_time if counter.last_external_count_time > 0 else float('inf')
+                print(f"Time since external count: {int(time_since)} seconds")
+            if counter.last_counter_id:
+                print(f"Last counter ID: {counter.last_counter_id}")
+                # Check if our bot was the last counter
+                is_bot_last_counter = False
+                for account in counter.accounts:
+                    if hasattr(account, 'id') and account.id == counter.last_counter_id:
+                        is_bot_last_counter = True
+                        break
+                print(f"Last counter was {'our bot' if is_bot_last_counter else 'an external user'}")
             if counter.last_counter_index is not None:
                 print(f"Last counter: {counter.accounts[counter.last_counter_index].username}")
             
@@ -1486,6 +1712,35 @@ def main():
                 print("✅ All network sessions reconnected successfully")
             else:
                 print("❌ Error reconnecting network sessions")
+            
+        elif choice == '20':
+            # Toggle solo mode
+            if counter.solo_mode:
+                counter.solo_mode = False
+                print("❌ Solo mode DISABLED")
+            else:
+                counter.solo_mode = True
+                print("✅ Solo mode ENABLED - Bot will wait for external users")
+            
+        elif choice == '21':
+            print("⚠️ NOTE: Solo timeout is no longer used. Bot will always wait for another user when in solo mode.")
+            print("This option is kept for compatibility but has no effect.")
+            timeout = int(input("Enter solo timeout (seconds): "))
+            counter.solo_timeout = timeout
+            counter.save_config()
+            print(f"Set solo timeout to {timeout} seconds (Note: This value is not actually used)")
+            
+        elif choice == '22':
+            print("\n=== EMERGENCY COUNT FIX ===")
+            counter.reset_count_to_one()
+            
+        elif choice == '23':
+            print("\n=== EMERGENCY: Deep Scan for Reset Messages ===")
+            success, message = counter.force_rescan_for_resets()
+            if success:
+                print(f"✅ Reset detected and count set to 0: {message}")
+            else:
+                print(f"❌ Reset detection failed: {message}")
             
         elif choice == '0':
             print("Exiting...")

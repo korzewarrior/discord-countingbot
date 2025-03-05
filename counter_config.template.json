@@ -21,6 +21,8 @@
   "speed_mode": false,
   "messages_per_second": 5.0,
   "verify_last_message": true,
+  "solo_mode": false,
+  "solo_timeout": 300,
   "accounts": [
     {
       "username": "example_account1",
