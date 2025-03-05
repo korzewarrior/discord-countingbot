@@ -42,5 +42,8 @@ Thumbs.db
 *.swp
 *.swo
 
+# Legacy code (should not be included)
+legacy/
+
 # Shared screenshots (these should be committed when available)
 # screenshots/
